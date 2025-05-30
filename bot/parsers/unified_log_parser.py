@@ -41,6 +41,9 @@ class UnifiedLogParser:
         self.player_lifecycle: Dict[str, Dict[str, Any]] = {}
         self.server_status: Dict[str, Dict[str, Any]] = {}
         self.log_file_hashes: Dict[str, str] = {}
+        
+        # Player name resolution cache
+        self.player_name_cache: Dict[str, str] = {}
 
         # Compile patterns once for efficiency
         self.patterns = self._compile_patterns()
@@ -127,44 +130,12 @@ class UnifiedLogParser:
         }
 
     def normalize_mission_name(self, mission_id: str) -> str:
-        """Convert mission ID to readable name"""
-        if mission_id in self.mission_mappings:
-            return self.mission_mappings[mission_id]
-
-        # Generate fallback name
-        if '_Airport_' in mission_id:
-            return f"Airport Mission ({mission_id.split('_')[-1]})"
-        elif '_Military_' in mission_id:
-            return f"Military Mission ({mission_id.split('_')[-1]})"
-        elif '_Ind_' in mission_id or '_PromZone_' in mission_id:
-            return f"Industrial Mission ({mission_id.split('_')[-1]})"
-        elif '_KhimMash_' in mission_id:
-            return f"Chemical Plant Mission ({mission_id.split('_')[-1]})"
-        elif '_Bunker_' in mission_id:
-            return f"Bunker Mission ({mission_id.split('_')[-1]})"
-        elif '_Sawmill_' in mission_id:
-            return f"Sawmill Mission ({mission_id.split('_')[-1]})"
-        else:
-            # Extract readable parts from mission ID
-            parts = mission_id.replace('GA_', '').replace('_Mis', '').replace('_mis', '').split('_')
-            readable_parts = [part.capitalize() for part in parts if part.isalpha()]
-            if readable_parts:
-                return f"{' '.join(readable_parts)} Mission"
-            else:
-                return f"Mission ({mission_id})"
+        """Convert mission ID to readable name using EmbedFactory"""
+        return EmbedFactory.normalize_mission_name(mission_id)
 
     def get_mission_level(self, mission_id: str) -> int:
-        """Determine mission difficulty level based on type"""
-        if any(keyword in mission_id.lower() for keyword in ['military', 'bunker', 'khimmash']):
-            return 5  # High tier
-        elif any(keyword in mission_id.lower() for keyword in ['airport', 'promzone', 'kamensk']):
-            return 4  # High-medium tier
-        elif any(keyword in mission_id.lower() for keyword in ['ind_', 'industrial']):
-            return 3  # Medium tier
-        elif any(keyword in mission_id.lower() for keyword in ['sawmill', 'lighthouse', 'elevator']):
-            return 2  # Low-medium tier
-        else:
-            return 1  # Low tier
+        """Determine mission difficulty level using EmbedFactory"""
+        return EmbedFactory.get_mission_level(mission_id)
 
     async def get_sftp_connection(self, server_config: Dict[str, Any]) -> Optional[asyncssh.SSHClientConnection]:
         """Get or create bulletproof SFTP connection"""
@@ -341,10 +312,8 @@ class UnifiedLogParser:
                     player_id = register_match.group(1)
                     player_key = f"{guild_id}_{player_id}"
 
-                    # Get player name
-                    player_name = "Unknown Player"
-                    if player_key in self.player_lifecycle:
-                        player_name = self.player_lifecycle[player_key].get('name', 'Unknown Player')
+                    # Resolve player name using advanced resolution
+                    player_name = await self.resolve_player_name(player_id, guild_id)
 
                     # Track session
                     self.player_sessions[player_key] = {
@@ -361,11 +330,10 @@ class UnifiedLogParser:
                     # Create embed (only if not cold start)
                     if not cold_start:
                         embed = EmbedFactory.create_connection_embed(
-                            title="🟢 Player Connected",
-                            description=f"**{player_name}** has joined the server",
+                            title="Player Connected",
+                            description="New player has joined the server",
                             player_name=player_name,
-                            player_id=player_id,
-                            color=0x00FF00
+                            player_id=player_id
                         )
                         embeds.append(embed)
 
@@ -374,12 +342,15 @@ class UnifiedLogParser:
                     player_id = disconnect_match.group(1)
                     session_key = f"{guild_id}_{player_id}"
 
-                    # Get player name
+                    # Resolve player name using advanced resolution
                     player_name = "Unknown Player"
                     if session_key in self.player_sessions:
                         player_name = self.player_sessions[session_key].get('player_name', 'Unknown Player')
                         self.player_sessions[session_key]['status'] = 'offline'
                         self.player_sessions[session_key]['left_at'] = datetime.now(timezone.utc).isoformat()
+                    else:
+                        # Try to resolve from database if not in current session
+                        player_name = await self.resolve_player_name(player_id, guild_id)
 
                     # Update voice channel
                     await self.update_voice_channel(str(guild_id))
@@ -387,11 +358,10 @@ class UnifiedLogParser:
                     # Create embed (only if not cold start)
                     if not cold_start:
                         embed = EmbedFactory.create_connection_embed(
-                            title="🔴 Player Disconnected",
-                            description=f"**{player_name}** has left the server",
+                            title="Player Disconnected",
+                            description="Player has left the server",
                             player_name=player_name,
-                            player_id=player_id,
-                            color=0xFF0000
+                            player_id=player_id
                         )
                         embeds.append(embed)
 
@@ -467,50 +437,44 @@ class UnifiedLogParser:
     async def create_mission_embed(self, mission_id: str, state: str, respawn_time: Optional[int] = None) -> Optional[discord.Embed]:
         """Create mission embed"""
         try:
-            mission_name = self.normalize_mission_name(mission_id)
             mission_level = self.get_mission_level(mission_id)
 
             if state == 'READY':
                 embed = EmbedFactory.create_mission_embed(
-                    title="🎯 Mission Available",
-                    description=f"**{mission_name}** is now available",
+                    title="Mission Available",
+                    description="New mission objective is ready for deployment",
                     mission_id=mission_id,
                     level=mission_level,
-                    state="READY",
-                    color=0x00FF00
+                    state="READY"
                 )
             elif state == 'IN_PROGRESS':
                 embed = EmbedFactory.create_mission_embed(
-                    title="⚔️ Mission In Progress",
-                    description=f"**{mission_name}** is being completed",
+                    title="Mission In Progress",
+                    description="Mission objective is currently being completed",
                     mission_id=mission_id,
                     level=mission_level,
-                    state="IN_PROGRESS",
-                    color=0xFFAA00
+                    state="IN_PROGRESS"
                 )
             elif state == 'COMPLETED':
                 embed = EmbedFactory.create_mission_embed(
-                    title="✅ Mission Completed",
-                    description=f"**{mission_name}** has been completed",
+                    title="Mission Completed",
+                    description="Mission objective has been successfully completed",
                     mission_id=mission_id,
                     level=mission_level,
-                    state="COMPLETED",
-                    color=0x0099FF
+                    state="COMPLETED"
                 )
             elif state == 'RESPAWN' and respawn_time:
                 embed = EmbedFactory.create_mission_embed(
-                    title="🔄 Mission Respawning",
-                    description=f"**{mission_name}** respawns in {respawn_time}s",
+                    title="Mission Respawning",
+                    description="Mission objective is preparing for redeployment",
                     mission_id=mission_id,
                     level=mission_level,
                     state="RESPAWN",
-                    respawn_time=respawn_time,
-                    color=0x888888
+                    respawn_time=respawn_time
                 )
             else:
                 return None
 
-            embed.set_footer(text="Mission Event • Emerald Servers")
             return embed
 
         except Exception as e:
@@ -545,47 +509,19 @@ class UnifiedLogParser:
     async def create_trader_embed(self, location: str = "Unknown") -> Optional[discord.Embed]:
         """Create trader embed"""
         try:
-            embed = discord.Embed(
-                title="🏪 Trader Arrived",
-                description=f"A trader has arrived at {location}",
-                color=0xFFD700,
+            embed = EmbedFactory.create_trader_embed(
+                location=location,
                 timestamp=datetime.now(timezone.utc)
             )
-            embed.add_field(name="Location", value=location, inline=True)
-            embed.add_field(name="Status", value="Available", inline=True)
-            embed.set_thumbnail(url="attachment://Trader.png")
-            embed.set_footer(text="Trader Event • Emerald Servers")
             return embed
         except Exception as e:
             logger.error(f"Failed to create trader embed: {e}")
             return None
 
     async def create_vehicle_embed(self, action: str, vehicle_type: str) -> Optional[discord.Embed]:
-        """Create vehicle embed"""
-        try:
-            if action == 'spawn':
-                title = "🚗 Vehicle Spawned"
-                description = f"A {vehicle_type} has been deployed"
-                color = 0x00FF00
-            else:
-                title = "🔧 Vehicle Removed"
-                description = f"A {vehicle_type} has been removed"
-                color = 0xFF0000
-
-            embed = discord.Embed(
-                title=title,
-                description=description,
-                color=color,
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.add_field(name="Vehicle Type", value=vehicle_type.replace('BP_SFPSVehicle_', ''), inline=True)
-            embed.add_field(name="Action", value=action.title(), inline=True)
-            embed.set_thumbnail(url="attachment://Vehicle.png")
-            embed.set_footer(text="Vehicle Event • Emerald Servers")
-            return embed
-        except Exception as e:
-            logger.error(f"Failed to create vehicle embed: {e}")
-            return None
+        """Create vehicle embed - BLOCKED per requirements"""
+        # Vehicle embeds are suppressed per task requirements
+        return None
 
     async def update_voice_channel(self, guild_id: str):
         """BULLETPROOF voice channel update"""
@@ -938,6 +874,57 @@ class UnifiedLogParser:
             logger.info("✅ Parser state reset")
         except Exception as e:
             logger.error(f"Error resetting parser state: {e}")
+
+    async def resolve_player_name(self, player_id: str, guild_id: str) -> str:
+        """Resolve player name from ID using database and session cache"""
+        try:
+            # Check cache first
+            cache_key = f"{guild_id}_{player_id}"
+            if cache_key in self.player_name_cache:
+                return self.player_name_cache[cache_key]
+            
+            # Check current session lifecycle
+            if cache_key in self.player_lifecycle:
+                name = self.player_lifecycle[cache_key].get('name')
+                if name and name != 'Unknown Player':
+                    self.player_name_cache[cache_key] = name
+                    return name
+            
+            # Check database
+            if hasattr(self.bot, 'db_manager') and self.bot.db_manager:
+                try:
+                    player_doc = await self.bot.db_manager.players.find_one({
+                        'guild_id': int(guild_id),
+                        'player_id': player_id
+                    })
+                    
+                    if player_doc:
+                        name = player_doc.get('player_name', 'Unknown Player')
+                        if name and name != 'Unknown Player':
+                            self.player_name_cache[cache_key] = name
+                            return name
+                    
+                    # Check PvP data collection for historical names
+                    pvp_doc = await self.bot.db_manager.pvp_data.find_one({
+                        'guild_id': int(guild_id),
+                        'player_id': player_id
+                    })
+                    
+                    if pvp_doc:
+                        name = pvp_doc.get('player_name', 'Unknown Player')
+                        if name and name != 'Unknown Player':
+                            self.player_name_cache[cache_key] = name
+                            return name
+                            
+                except Exception as db_error:
+                    logger.error(f"Database lookup failed for player {player_id}: {db_error}")
+            
+            # Fallback to Unknown Player
+            return "Unknown Player"
+            
+        except Exception as e:
+            logger.error(f"Error resolving player name for {player_id}: {e}")
+            return "Unknown Player"
 
     def get_active_player_count(self, guild_id: str) -> int:
         """Get active player count for a guild"""

@@ -163,8 +163,8 @@ class EmeraldKillfeedBot(commands.Bot):
 
     async def register_commands_safely(self):
         """
-        TRULY Bulletproof Command Registration System
-        Smart fallback system with proper rate limit handling
+        ADVANCED Command Sync Logic - Global with Guild Fallback
+        Implements requirements: global sync first, then per-guild fallback on failure
         """
         try:
             # Get command count
@@ -191,11 +191,11 @@ class EmeraldKillfeedBot(commands.Bot):
                 except:
                     pass
 
-            # Try global sync first
+            # STEP 1: Try global sync first (per requirements)
             logger.info(f"🌍 Attempting GLOBAL command sync...")
             try:
                 await asyncio.wait_for(self.sync_commands(), timeout=30)
-                logger.info(f"✅ Global sync successful - all guilds updated instantly")
+                logger.info(f"✅ GLOBAL SYNC SUCCESSFUL - All guilds updated instantly")
 
                 # Save success marker
                 with open("global_sync_success.txt", 'w') as f:
@@ -203,7 +203,7 @@ class EmeraldKillfeedBot(commands.Bot):
                 return
 
             except asyncio.TimeoutError:
-                logger.warning("⏰ Global sync timed out, trying guild-specific fallback")
+                logger.warning("⏰ Global sync timed out - proceeding to guild fallback")
             except Exception as e:
                 error_msg = str(e).lower()
                 if "rate limited" in error_msg or "429" in error_msg:
@@ -219,38 +219,45 @@ class EmeraldKillfeedBot(commands.Bot):
                         logger.error(f"💾 Rate limit cooldown saved for {retry_time + 60}s")
                     return
                 else:
-                    logger.warning(f"⚠️ Global sync failed: {e}, trying guild fallback")
+                    logger.warning(f"⚠️ Global sync failed: {e} - proceeding to guild fallback")
 
-            # Guild-specific fallback with smart rate limiting
-            if len(self.guilds) <= 3:  # Only for small bot deployments
-                logger.info(f"🏠 Attempting guild-specific sync for {len(self.guilds)} guilds...")
-                success_count = 0
-                
-                for guild in self.guilds:
-                    try:
-                        await asyncio.wait_for(self.sync_commands(guild=guild), timeout=10)
-                        success_count += 1
-                        logger.info(f"✅ Guild sync successful: {guild.name}")
-                        
-                        # Small delay between guild syncs
-                        if success_count < len(self.guilds):
-                            await asyncio.sleep(2)
-                            
-                    except Exception as guild_error:
-                        if "rate limited" in str(guild_error).lower():
-                            logger.error(f"❌ Guild sync rate limited for {guild.name}")
-                            break
-                        else:
-                            logger.warning(f"⚠️ Guild sync failed for {guild.name}: {guild_error}")
-                
-                if success_count > 0:
-                    logger.info(f"✅ Guild fallback completed: {success_count}/{len(self.guilds)} successful")
-                    return
+            # STEP 2: Guild-specific fallback (per requirements)
+            logger.info(f"🏠 Attempting PER-GUILD sync fallback for {len(self.guilds)} guilds...")
+            success_count = 0
+            rate_limited = False
             
-            logger.warning("⚠️ All sync methods failed - commands will sync on next restart")
+            for guild in self.guilds:
+                if rate_limited:
+                    break
+                    
+                try:
+                    await asyncio.wait_for(self.sync_commands(guild=guild), timeout=15)
+                    success_count += 1
+                    logger.info(f"✅ GUILD SYNC SUCCESSFUL: {guild.name}")
+                    
+                    # Small delay between guild syncs to avoid rate limits
+                    if success_count < len(self.guilds):
+                        await asyncio.sleep(3)
+                        
+                except Exception as guild_error:
+                    error_msg = str(guild_error).lower()
+                    if "rate limited" in error_msg or "429" in error_msg:
+                        logger.error(f"❌ Guild sync rate limited for {guild.name}")
+                        rate_limited = True
+                        break
+                    else:
+                        logger.warning(f"⚠️ Guild sync failed for {guild.name}: {guild_error}")
+            
+            if success_count > 0:
+                logger.info(f"✅ GUILD FALLBACK COMPLETED: {success_count}/{len(self.guilds)} successful")
+                return
+            else:
+                logger.warning("⚠️ ALL SYNC METHODS FAILED - Commands will sync on next restart")
 
         except Exception as e:
-            logger.error(f"❌ Command registration failed: {e}")
+            logger.error(f"❌ Command sync system failed: {e}")
+            import traceback
+            logger.error(f"Sync traceback: {traceback.format_exc()}")
 
     async def cleanup_connections(self):
         """Clean up AsyncSSH connections on shutdown"""
@@ -341,8 +348,10 @@ class EmeraldKillfeedBot(commands.Bot):
             # STEP 2: Wait for py-cord to process commands
             await asyncio.sleep(3.0)
 
-            # STEP 3: Bulletproof command sync
+            # STEP 3: Advanced command sync with logging
+            logger.info("🔧 Starting advanced command sync system...")
             await self.register_commands_safely()
+            logger.info("✅ Command sync system completed")
 
             # STEP 4: Database setup
             logger.info("🚀 Starting database and parser setup...")
