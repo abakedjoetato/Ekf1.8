@@ -461,10 +461,8 @@ class UnifiedLogParser:
                 logger.error(f"Error processing log line: {e}")
                 continue
 
-        # Final status logging
-        if cold_start_mode:
-            logger.info(f"🔍 Cold start completed: tracked {processed_events} events from {len(lines)} lines (no embeds generated)")
-        else:
+        # Final status logging for hot start only
+        if not cold_start_mode:
             logger.info(f"🔍 Parser completed: found {len(embeds)} events from {len(lines)} new lines")
 
         return embeds
@@ -1095,15 +1093,22 @@ class UnifiedLogParser:
             logger.info(f"🔍 Parser Mode: {parser_mode} | Source: {source_type} | Lines: {total_lines}")
             
             if is_cold_start:
-                logger.info(f"🧊 Cold Start: Processing {total_lines} lines for data tracking (no embeds)")
-                # Process all lines for data tracking but skip embed generation
-                lines_to_process = lines
-                cold_start_mode = True
+                logger.info(f"🧊 Cold Start: Tracking {total_lines} lines without generating embeds")
+                # Cold start: just track state, don't process events
+                self.last_log_position[server_key] = total_lines
+                self.file_states[server_key] = {
+                    'line_count': total_lines,
+                    'last_updated': datetime.now(timezone.utc).isoformat(),
+                    'cold_start_complete': True
+                }
+                await self._save_persistent_state()
+                logger.info(f"🧊 Cold start complete for {server_name}. Next run will process new events.")
+                return
             else:
                 # Hot start - process new lines only
                 new_lines = lines[last_position:] if last_position < total_lines else []
                 if not new_lines:
-                    logger.debug(f"🔥 Hot Start: No new lines to process")
+                    logger.info(f"🔥 Hot Start: No new lines to process")
                     return
 
                 logger.info(f"🔥 Hot Start: Processing {len(new_lines)} new lines (from position {last_position})")
@@ -1158,50 +1163,26 @@ class UnifiedLogParser:
                 if not cold_start_mode and processed_embeds:
                     await self.send_log_embeds(guild_id, server_id, processed_embeds)
 
-            # Log event type summary
+            # Log event type summary (hot start only)
             event_summary = []
             for event_type, count in event_counts.items():
                 if count > 0:
                     event_summary.append(f"{event_type.title()}: {count}")
             
-            mode_indicator = " (tracked only)" if cold_start_mode else ""
             if event_summary:
-                logger.info(f"📊 Events processed{mode_indicator}: {', '.join(event_summary)}")
+                logger.info(f"📊 Events processed: {', '.join(event_summary)}")
             else:
-                logger.info(f"📊 Events processed{mode_indicator}: None")
+                logger.info(f"📊 Events processed: None")
 
-            # Update position tracking - ensure future runs are hot start
+            # Update position tracking
             self.last_log_position[server_key] = total_lines
             self.file_states[server_key] = {
                 'line_count': total_lines,
                 'last_updated': datetime.now(timezone.utc).isoformat(),
-                'cold_start_complete': True  # Mark cold start as complete
+                'cold_start_complete': True
             }
             await self._save_persistent_state()
-            
-            # If this was a cold start, log that next run will generate embeds
-            if cold_start_mode:
-                logger.info(f"🧊 Cold start complete for {server_name}. Next run will generate embeds for new events.")
 
         except Exception as e:
             logger.error(f"Error parsing server logs: {e}")
 
-    async def _process_cold_start(self, content: str, guild_id: str, server_id: str):
-        """Process cold start - parse without generating embeds"""
-        try:
-            lines = content.splitlines()
-            server_key = f"{guild_id}_{server_id}"
-
-            # Update file state without processing events
-            self.file_states[server_key] = {
-                'line_count': len(lines),
-                'last_updated': datetime.now(timezone.utc).isoformat()
-            }
-
-            # Save persistent state
-            await self._save_persistent_state()
-
-            logger.info(f"🧊 Cold start completed - tracked {len(lines)} lines for future processing")
-
-        except Exception as e:
-            logger.error(f"Error in cold start processing: {e}")
