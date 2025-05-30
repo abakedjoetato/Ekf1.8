@@ -607,7 +607,7 @@ class UnifiedLogParser:
             # Count active players with better key validation
             guild_prefix = f"{guild_id}_"
             active_players = 0
-            
+
             for key, session in self.player_sessions.items():
                 if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
                     active_players += 1
@@ -652,12 +652,12 @@ class UnifiedLogParser:
             if not guild:
                 logger.warning(f"Guild {guild_id_int} not found")
                 return
-                
+
             voice_channel = guild.get_channel(voice_channel_id)
             if not voice_channel:
                 logger.warning(f"Voice channel {voice_channel_id} not found in guild {guild_id_int}")
                 return
-                
+
             if voice_channel.type != discord.ChannelType.voice:
                 logger.warning(f"Channel {voice_channel_id} is not a voice channel")
                 return
@@ -675,8 +675,7 @@ class UnifiedLogParser:
                 except Exception as edit_error:
                     logger.error(f"Error editing voice channel: {edit_error}")
             else:
-                logger.debug(f"Voice channel already has correct name: {new_name}")
-
+                logger.debug(f"Voice channel already has correct name: {new_name}")```python
         except Exception as e:
             logger.error(f"Voice channel update failed: {e}")
             import traceback

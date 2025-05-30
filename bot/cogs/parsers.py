@@ -617,57 +617,6 @@ class Parsers(commands.Cog):
             await ctx.followup.send(embed=embed)
 
         except Exception as e:
-            logger.error(f"Failed to refresh player count: {e}")
-            await ctx.followup.send(f"❌ Failed to refresh: {str(e)}")ser.log_file_hashes.clear()
-            
-            # Update voice channels to reflect reset counts (0 players)
-            await parser.update_voice_channel(str(guild_id))
-
-            # Trigger immediate cold start
-            try:
-                await parser.run_log_parser()
-                
-                embed = discord.Embed(
-                    title="🔄 Player Count Refresh Complete",
-                    description="Player counts have been reset and cold start parsing completed.",
-                    color=0x00AA00
-                )
-                
-                embed.add_field(
-                    name="Actions Completed",
-                    value="• Reset all tracking states\n• Updated voice channel counts\n• Ran cold start parsing\n• Processed current log data",
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="Next Scheduled Run",
-                    value="Will be a hot start processing only new events",
-                    inline=False
-                )
-                
-            except Exception as parse_error:
-                logger.error(f"Cold start parsing failed: {parse_error}")
-                embed = discord.Embed(
-                    title="⚠️ Partial Success",
-                    description="States were reset but cold start parsing failed.",
-                    color=0xFFAA00
-                )
-                
-                embed.add_field(
-                    name="Completed",
-                    value="• Reset all tracking states\n• Updated voice channel counts",
-                    inline=False
-                )
-                
-                embed.add_field(
-                    name="Failed",
-                    value=f"• Cold start parsing: {str(parse_error)}",
-                    inline=False
-                )
-
-            await ctx.followup.send(embed=embed)
-
-        except Exception as e:
             logger.error(f"Refresh playercount error: {e}")
             embed = discord.Embed(
                 title="❌ Refresh Failed",
