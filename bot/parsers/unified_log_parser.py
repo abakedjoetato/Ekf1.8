@@ -410,7 +410,7 @@ class UnifiedLogParser:
                     if player_key in self.player_lifecycle:
                         player_name = self.player_lifecycle[player_key].get('name', 'Unknown Player')
 
-                    # Always process player connection data
+                    # Always process player connection data (including during cold start for accurate counts)
                     embed = await self.process_player_connection(
                         guild_id, player_id, player_name, 'joined'
                     )
@@ -420,7 +420,7 @@ class UnifiedLogParser:
                         if not cold_start_mode:
                             embeds.append(embed)
                         else:
-                            logger.debug(f"👤 Processed player join: {player_name} (embed skipped)")
+                            logger.debug(f"👤 Processed player join: {player_name} (embed skipped, but tracking updated)")
                     else:
                         logger.debug(f"👤 Failed to process player join: {player_name}")
 
@@ -437,7 +437,7 @@ class UnifiedLogParser:
                     elif player_key in self.player_lifecycle:
                         player_name = self.player_lifecycle[player_key].get('name', 'Unknown Player')
 
-                    # Always process player disconnect data
+                    # Always process player disconnect data (including during cold start for accurate counts)
                     embed = await self.process_player_connection(
                         guild_id, player_id, player_name, 'disconnected'
                     )
@@ -447,7 +447,7 @@ class UnifiedLogParser:
                         if not cold_start_mode:
                             embeds.append(embed)
                         else:
-                            logger.debug(f"👤 Processed player disconnect: {player_name} (embed skipped)")
+                            logger.debug(f"👤 Processed player disconnect: {player_name} (embed skipped, but tracking updated)")
                     else:
                         logger.debug(f"👤 Failed to process player disconnect: {player_name}")
 
@@ -644,15 +644,23 @@ class UnifiedLogParser:
             if not guild_config:
                 return
                 
-            # Check for voice channel configuration
-            voice_channel_id = guild_config.get('channels', {}).get('voice_count')
-            if not voice_channel_id:
-                # Check server-specific voice channels
-                server_channels = guild_config.get('server_channels', {})
+            # Check for voice channel configuration with proper fallback
+            voice_channel_id = None
+            server_channels = guild_config.get('server_channels', {})
+            
+            # Try to find any configured voice channel (server-specific or default)
+            if 'default' in server_channels and 'voice_count' in server_channels['default']:
+                voice_channel_id = server_channels['default']['voice_count']
+            else:
+                # Check any server-specific voice channels
                 for server_id, channels in server_channels.items():
                     if 'voice_count' in channels:
                         voice_channel_id = channels['voice_count']
                         break
+                        
+            # Legacy fallback
+            if not voice_channel_id:
+                voice_channel_id = guild_config.get('channels', {}).get('voice_count')
                         
             if not voice_channel_id:
                 return
@@ -666,9 +674,15 @@ class UnifiedLogParser:
                         new_name = f"🟢 Players Online: {active_players}"
                         if voice_channel.name != new_name:
                             await voice_channel.edit(name=new_name)
-                            logger.debug(f"Updated voice channel to show {active_players} players online")
+                            logger.info(f"🔊 Updated voice channel '{voice_channel.name}' to show {active_players} players online")
+                        else:
+                            logger.debug(f"🔊 Voice channel already shows correct count: {active_players}")
+                    else:
+                        logger.warning(f"🔊 Voice channel {voice_channel_id} not found or not a voice channel")
+                else:
+                    logger.warning(f"🔊 Guild {guild_id_int} not found")
             except Exception as e:
-                logger.warning(f"Failed to update voice channel: {e}")
+                logger.warning(f"🔊 Failed to update voice channel: {e}")
                 
         except Exception as e:
             logger.error(f"Error updating voice channel for guild {guild_id}: {e}")
@@ -1094,7 +1108,15 @@ class UnifiedLogParser:
             
             if is_cold_start:
                 logger.info(f"🧊 Cold Start: Tracking {total_lines} lines without generating embeds")
-                # Cold start: just track state, don't process events
+                
+                # During cold start, we still need to parse for current player state
+                # Parse content in cold start mode to update player counts
+                await self.parse_log_content(content, str(guild_id), server_id, cold_start_mode=True)
+                
+                # Update voice channel with current player count after cold start parsing
+                await self.update_voice_channel(str(guild_id))
+                
+                # Cold start: track state
                 self.last_log_position[server_key] = total_lines
                 self.file_states[server_key] = {
                     'line_count': total_lines,
