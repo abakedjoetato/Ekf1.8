@@ -543,7 +543,7 @@ class Parsers(commands.Cog):
         try:
             await ctx.defer()
 
-            if not hasattr(self.bot, 'unified_parser'):
+            if not hasattr(self.bot, 'unified_log_parser') or not self.bot.unified_log_parser:
                 embed = discord.Embed(
                     title="❌ Parser Not Available",
                     description="The unified log parser is not initialized.",
@@ -552,7 +552,7 @@ class Parsers(commands.Cog):
                 await ctx.followup.send(embed=embed)
                 return
 
-            parser = self.bot.unified_parser
+            parser = self.bot.unified_log_parser
             guild_id = ctx.guild.id
             
             # Reset file states (forces cold start)

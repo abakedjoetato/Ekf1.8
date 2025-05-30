@@ -624,24 +624,47 @@ class UnifiedLogParser:
                 logger.debug(f"No guild config found for {guild_id_int}")
                 return
 
-            # Find voice channel ID with better logic
+            # Find voice channel ID with comprehensive mapping
             voice_channel_id = None
 
-            # Check server channels first
+            # Method 1: Check server_channels (new format)
             server_channels = guild_config.get('server_channels', {})
-            for server_id, channels in server_channels.items():
-                if isinstance(channels, dict) and 'voice_count' in channels:
-                    voice_channel_id = channels['voice_count']
-                    logger.debug(f"Found voice channel {voice_channel_id} in server {server_id}")
-                    break
+            for server_key, channels in server_channels.items():
+                if isinstance(channels, dict):
+                    # Try multiple voice channel key names
+                    for voice_key in ['voice_count', 'playercountvc', 'playercount']:
+                        if voice_key in channels:
+                            voice_channel_id = channels[voice_key]
+                            logger.debug(f"Found voice channel {voice_channel_id} as {voice_key} in server {server_key}")
+                            break
+                    if voice_channel_id:
+                        break
 
-            # Legacy fallback
+            # Method 2: Check channels (legacy format)
             if not voice_channel_id:
                 legacy_channels = guild_config.get('channels', {})
                 if isinstance(legacy_channels, dict):
-                    voice_channel_id = legacy_channels.get('voice_count')
-                    if voice_channel_id:
-                        logger.debug(f"Using legacy voice channel {voice_channel_id}")
+                    for voice_key in ['voice_count', 'playercountvc', 'playercount']:
+                        if voice_key in legacy_channels:
+                            voice_channel_id = legacy_channels[voice_key]
+                            logger.debug(f"Found legacy voice channel {voice_channel_id} as {voice_key}")
+                            break
+
+            # Method 3: Check if any servers have voice channels configured
+            if not voice_channel_id:
+                servers = guild_config.get('servers', [])
+                for server in servers:
+                    server_id = str(server.get('_id', ''))
+                    if server_id in server_channels:
+                        channels = server_channels[server_id]
+                        if isinstance(channels, dict):
+                            for voice_key in ['voice_count', 'playercountvc', 'playercount']:
+                                if voice_key in channels:
+                                    voice_channel_id = channels[voice_key]
+                                    logger.debug(f"Found voice channel {voice_channel_id} in server {server_id}")
+                                    break
+                        if voice_channel_id:
+                            break
 
             if not voice_channel_id:
                 logger.debug(f"No voice channel configured for guild {guild_id_int}")
@@ -864,13 +887,43 @@ class UnifiedLogParser:
 
     def get_parser_status(self) -> Dict[str, Any]:
         """Get parser status"""
-        active_sessions = sum(1 for session in self.player_sessions.values() if session.get('status') == 'online')
-        return {
-            'active_sessions': active_sessions,
-            'tracked_servers': len(self.file_states),
-            'sftp_connections': len(self.sftp_connections),
-            'status': 'healthy'
-        }
+        try:
+            active_sessions = sum(1 for session in self.player_sessions.values() if session.get('status') == 'online')
+            
+            # Calculate active players by guild
+            active_players_by_guild = {}
+            for key, session in self.player_sessions.items():
+                if session.get('status') == 'online':
+                    guild_id = session.get('guild_id', 'unknown')
+                    active_players_by_guild[guild_id] = active_players_by_guild.get(guild_id, 0) + 1
+            
+            # Check SFTP connection status
+            active_connections = 0
+            for conn in self.sftp_connections.values():
+                try:
+                    if not conn.is_closed():
+                        active_connections += 1
+                except:
+                    pass
+            
+            return {
+                'active_sessions': active_sessions,
+                'total_tracked_servers': len(self.file_states),
+                'sftp_connections': active_connections,
+                'connection_status': f"{active_connections}/{len(self.sftp_connections)} active",
+                'active_players_by_guild': active_players_by_guild,
+                'status': 'healthy' if active_sessions >= 0 else 'error'
+            }
+        except Exception as e:
+            logger.error(f"Error getting parser status: {e}")
+            return {
+                'active_sessions': 0,
+                'total_tracked_servers': 0,
+                'sftp_connections': 0,
+                'connection_status': 'error',
+                'active_players_by_guild': {},
+                'status': 'error'
+            }
 
     def reset_parser_state(self):
         """Reset all parser state"""

@@ -163,8 +163,8 @@ class EmeraldKillfeedBot(commands.Bot):
 
     async def register_commands_safely(self):
         """
-        Bulletproof Command Registration System
-        Uses global sync ONLY, with guild-specific fallback disabled to prevent rate limits
+        TRULY Bulletproof Command Registration System
+        Smart fallback system with proper rate limit handling
         """
         try:
             # Get command count
@@ -191,36 +191,63 @@ class EmeraldKillfeedBot(commands.Bot):
                 except:
                     pass
 
-            # BULLETPROOF: Only use global sync, never guild-specific
-            logger.info(f"🌍 Attempting GLOBAL command sync (bulletproof mode)...")
+            # Try global sync first
+            logger.info(f"🌍 Attempting GLOBAL command sync...")
             try:
-                await self.sync_commands()
+                await asyncio.wait_for(self.sync_commands(), timeout=30)
                 logger.info(f"✅ Global sync successful - all guilds updated instantly")
 
                 # Save success marker
                 with open("global_sync_success.txt", 'w') as f:
                     f.write(str(time.time()))
-
                 return
 
+            except asyncio.TimeoutError:
+                logger.warning("⏰ Global sync timed out, trying guild-specific fallback")
             except Exception as e:
-                error_msg = str(e)
-                if "rate limited" in error_msg.lower():
+                error_msg = str(e).lower()
+                if "rate limited" in error_msg or "429" in error_msg:
                     logger.error(f"❌ Global sync rate limited: {e}")
-
+                    
                     # Extract retry time and save cooldown
-                    retry_match = re.search(r'Retrying in ([\d.]+) seconds', error_msg)
+                    retry_match = re.search(r'Retrying in ([\d.]+) seconds', str(e))
                     if retry_match:
                         retry_time = float(retry_match.group(1))
-                        cooldown_until = time.time() + retry_time + 300  # Add 5 minute buffer
+                        cooldown_until = time.time() + retry_time + 60
                         with open(rate_limit_file, 'w') as f:
                             f.write(str(cooldown_until))
-                        logger.error(f"💾 Rate limit cooldown saved for {retry_time + 300}s")
+                        logger.error(f"💾 Rate limit cooldown saved for {retry_time + 60}s")
                     return
                 else:
-                    logger.error(f"❌ Global sync failed: {e}")
-                    # Don't fallback to guild sync - this causes rate limits
+                    logger.warning(f"⚠️ Global sync failed: {e}, trying guild fallback")
+
+            # Guild-specific fallback with smart rate limiting
+            if len(self.guilds) <= 3:  # Only for small bot deployments
+                logger.info(f"🏠 Attempting guild-specific sync for {len(self.guilds)} guilds...")
+                success_count = 0
+                
+                for guild in self.guilds:
+                    try:
+                        await asyncio.wait_for(self.sync_commands(guild=guild), timeout=10)
+                        success_count += 1
+                        logger.info(f"✅ Guild sync successful: {guild.name}")
+                        
+                        # Small delay between guild syncs
+                        if success_count < len(self.guilds):
+                            await asyncio.sleep(2)
+                            
+                    except Exception as guild_error:
+                        if "rate limited" in str(guild_error).lower():
+                            logger.error(f"❌ Guild sync rate limited for {guild.name}")
+                            break
+                        else:
+                            logger.warning(f"⚠️ Guild sync failed for {guild.name}: {guild_error}")
+                
+                if success_count > 0:
+                    logger.info(f"✅ Guild fallback completed: {success_count}/{len(self.guilds)} successful")
                     return
+            
+            logger.warning("⚠️ All sync methods failed - commands will sync on next restart")
 
         except Exception as e:
             logger.error(f"❌ Command registration failed: {e}")
@@ -332,13 +359,29 @@ class EmeraldKillfeedBot(commands.Bot):
                 logger.info("📡 Killfeed parser scheduled")
 
             if self.unified_log_parser:
-                self.scheduler.add_job(
-                    self.unified_log_parser.run_log_parser,
-                    'interval',
-                    seconds=180,
-                    id='unified_log_parser'
-                )
-                logger.info("📜 Unified log parser scheduled")
+                try:
+                    # Remove existing job if it exists
+                    try:
+                        self.scheduler.remove_job('unified_log_parser')
+                    except:
+                        pass
+                    
+                    self.scheduler.add_job(
+                        self.unified_log_parser.run_log_parser,
+                        'interval',
+                        seconds=180,
+                        id='unified_log_parser',
+                        max_instances=1,
+                        coalesce=True
+                    )
+                    logger.info("📜 Unified log parser scheduled (180s interval)")
+                    
+                    # Run initial parse
+                    asyncio.create_task(self.unified_log_parser.run_log_parser())
+                    logger.info("🔥 Initial unified log parser run triggered")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to schedule unified log parser: {e}")
 
             # STEP 7: Final status
             if self.user:
