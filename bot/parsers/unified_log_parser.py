@@ -629,6 +629,11 @@ class UnifiedLogParser:
     async def update_voice_channel(self, guild_id: str):
         """Update voice channel player count with current online players"""
         try:
+            # Skip if guild_id is a MongoDB ObjectId (invalid Discord guild ID)
+            if isinstance(guild_id, str) and len(guild_id) == 24 and all(c in '0123456789abcdef' for c in guild_id.lower()):
+                logger.warning(f"Skipping voice channel update for MongoDB ObjectId: {guild_id}")
+                return
+                
             guild_id_int = int(guild_id) if isinstance(guild_id, str) else guild_id
             
             # Count active players for this guild
@@ -844,13 +849,25 @@ class UnifiedLogParser:
                 total_servers_processed = 0
 
                 for guild_doc in guilds_list:
-                    guild_id = guild_doc.get('_id') or guild_doc.get('guild_id')
+                    # Get the actual Discord guild ID (integer), not MongoDB _id (ObjectId)
+                    guild_id = guild_doc.get('guild_id')
+                    if not guild_id:
+                        logger.warning(f"Skipping guild with no Discord guild_id: {guild_doc}")
+                        continue
+                    
+                    # Ensure guild_id is an integer
+                    try:
+                        guild_id = int(guild_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Invalid guild_id format: {guild_id}, skipping guild")
+                        continue
+                        
                     guild_name = guild_doc.get('name', f'Guild {guild_id}')
                     servers = guild_doc.get('servers', [])
                     
-                    # Skip if no valid guild ID
-                    if not guild_id:
-                        logger.warning(f"Skipping guild with no valid ID: {guild_doc}")
+                    # Skip if no servers configured
+                    if not servers:
+                        logger.debug(f"No servers configured for guild {guild_name}")
                         continue
 
                     if not servers:
