@@ -675,7 +675,8 @@ class UnifiedLogParser:
                 except Exception as edit_error:
                     logger.error(f"Error editing voice channel: {edit_error}")
             else:
-                logger.debug(f"Voice channel already has correct name: {new_name}")```python
+                logger.debug(f"Voice channel already has correct name: {new_name}")
+
         except Exception as e:
             logger.error(f"Voice channel update failed: {e}")
             import traceback
