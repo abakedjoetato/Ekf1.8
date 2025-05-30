@@ -70,43 +70,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Command hash calculation function
-def compute_command_hash(bot):
-    """
-    Computes a hash of the application command schema to detect changes.
-    This allows us to only sync commands when the structure has changed.
-
-    Args:
-        bot: The bot instance with application_commands
-
-    Returns:
-        str: SHA-256 hash of the command structure
-    """
-    # Get commands from the correct attribute
-    if hasattr(bot, 'pending_application_commands') and bot.pending_application_commands:
-        commands = [cmd.to_dict() for cmd in bot.pending_application_commands]
-        cmd_source = "pending_application_commands"
-    elif hasattr(bot, 'application_commands') and bot.application_commands:
-        commands = [cmd.to_dict() for cmd in bot.application_commands]
-        cmd_source = "application_commands"
-    else:
-        # Fallback - empty command structure will force sync once
-        commands = []
-        cmd_source = "none_found"
-
-    # Debug for observation
-    cmd_count = len(commands)
-    logger.info(f"🔍 Computing hash from {cmd_count} commands using {cmd_source}")
-
-    # Sort all commands and their properties for consistent hashing
-    raw = json.dumps(commands, sort_keys=True).encode('utf-8')
-    hash_value = hashlib.sha256(raw).hexdigest()
-
-    # Log hash details for debugging
-    logger.info(f"🔑 Generated command hash: {hash_value[:10]}... from {cmd_count} commands")
-
-    return hash_value
-
 class EmeraldKillfeedBot(commands.Bot):
     """Main bot class for Emerald's Killfeed"""
 
@@ -200,234 +163,67 @@ class EmeraldKillfeedBot(commands.Bot):
 
     async def register_commands_safely(self):
         """
-        Hybrid Command Registration: Global sync with guild-specific fallback
-        
-        1. Attempts global sync first (most efficient)
-        2. Falls back to guild-specific syncing if global fails
-        3. Uses rate limit protection and progressive syncing
+        Bulletproof Command Registration System
+        Uses global sync ONLY, with guild-specific fallback disabled to prevent rate limits
         """
-        command_count = len(self.pending_application_commands) if hasattr(self, 'pending_application_commands') else 0
-        logger.info(f"📊 {command_count} commands registered locally")
+        try:
+            # Get command count
+            command_count = len(self.pending_application_commands) if hasattr(self, 'pending_application_commands') else 0
+            logger.info(f"📊 {command_count} commands registered locally")
 
-        if command_count == 0:
-            logger.warning("⚠️ No commands to sync")
-            return
+            if command_count == 0:
+                logger.warning("⚠️ No commands to sync")
+                return
 
-        # Check for rate limit indicator file
-        rate_limit_file = "rate_limit_cooldown.txt"
-        if os.path.exists(rate_limit_file):
-            try:
-                with open(rate_limit_file, 'r') as f:
-                    cooldown_until = float(f.read().strip())
-                    if time.time() < cooldown_until:
-                        remaining = int(cooldown_until - time.time())
-                        logger.warning(f"⏳ Still in rate limit cooldown for {remaining}s - skipping sync")
-                        return
-                    else:
-                        os.remove(rate_limit_file)
-                        logger.info("✅ Rate limit cooldown expired")
-            except:
-                pass
+            # Check for existing rate limit
+            rate_limit_file = "rate_limit_cooldown.txt"
+            if os.path.exists(rate_limit_file):
+                try:
+                    with open(rate_limit_file, 'r') as f:
+                        cooldown_until = float(f.read().strip())
+                        if time.time() < cooldown_until:
+                            remaining = int(cooldown_until - time.time())
+                            logger.warning(f"⏳ Rate limit active for {remaining}s - skipping sync")
+                            return
+                        else:
+                            os.remove(rate_limit_file)
+                            logger.info("✅ Rate limit cooldown expired")
+                except:
+                    pass
 
-        # Compute current command hash
-        current_hash = compute_command_hash(self)
-        hash_file_path = "command_hash.txt"
-        global_sync_file = "global_sync_status.txt"
-        
-        # Read previous hash and global sync status
-        previous_hash = ''
-        global_sync_completed = False
-        
-        if os.path.exists(hash_file_path):
-            try:
-                with open(hash_file_path, 'r') as f:
-                    previous_hash = f.read().strip()
-            except Exception as e:
-                logger.warning(f"⚠️ Could not read previous hash: {e}")
-        
-        if os.path.exists(global_sync_file):
-            try:
-                with open(global_sync_file, 'r') as f:
-                    sync_data = f.read().strip().split(':')
-                    if len(sync_data) == 2 and sync_data[0] == current_hash:
-                        global_sync_completed = sync_data[1] == 'completed'
-            except Exception as e:
-                logger.warning(f"⚠️ Could not read global sync status: {e}")
-
-        # Check if commands changed
-        hash_changed = current_hash != previous_hash
-
-        # If commands haven't changed and global sync is complete, we're done
-        if not hash_changed and global_sync_completed:
-            logger.info(f"✅ Commands unchanged and global sync completed - all guilds up to date")
-            return
-
-        # STEP 1: Try global sync first (most efficient)
-        if hash_changed or not global_sync_completed:
-            logger.info(f"🌍 Attempting global command sync...")
+            # BULLETPROOF: Only use global sync, never guild-specific
+            logger.info(f"🌍 Attempting GLOBAL command sync (bulletproof mode)...")
             try:
                 await self.sync_commands()
-                logger.info(f"✅ Global sync successful - commands available to all guilds")
-                
-                # Mark global sync as completed
-                with open(global_sync_file, 'w') as f:
-                    f.write(f"{current_hash}:completed")
-                
-                # Save the new command hash
-                with open(hash_file_path, 'w') as f:
-                    f.write(current_hash)
-                
-                logger.info(f"🎉 Global sync complete - all {len(self.guilds)} guilds updated")
+                logger.info(f"✅ Global sync successful - all guilds updated instantly")
+
+                # Save success marker
+                with open("global_sync_success.txt", 'w') as f:
+                    f.write(str(time.time()))
+
                 return
-                
+
             except Exception as e:
                 error_msg = str(e)
                 if "rate limited" in error_msg.lower():
                     logger.error(f"❌ Global sync rate limited: {e}")
-                    
+
                     # Extract retry time and save cooldown
                     retry_match = re.search(r'Retrying in ([\d.]+) seconds', error_msg)
                     if retry_match:
                         retry_time = float(retry_match.group(1))
-                        cooldown_until = time.time() + retry_time + 60
+                        cooldown_until = time.time() + retry_time + 300  # Add 5 minute buffer
                         with open(rate_limit_file, 'w') as f:
                             f.write(str(cooldown_until))
-                        logger.error(f"💾 Saved rate limit cooldown until {retry_time + 60}s from now")
+                        logger.error(f"💾 Rate limit cooldown saved for {retry_time + 300}s")
                     return
                 else:
-                    logger.warning(f"⚠️ Global sync failed, falling back to guild-specific: {e}")
-
-        # STEP 2: Fallback to guild-specific syncing
-        logger.info(f"🏰 Falling back to guild-specific command syncing...")
-        
-        # Load processed guilds with their hashes
-        guild_hash_file = "guild_command_hashes.txt"
-        guild_hashes = {}
-        if os.path.exists(guild_hash_file):
-            try:
-                with open(guild_hash_file, 'r') as f:
-                    for line in f:
-                        line = line.strip()
-                        if ':' in line:
-                            guild_id_str, guild_hash = line.split(':', 1)
-                            try:
-                                guild_hashes[int(guild_id_str)] = guild_hash
-                            except ValueError:
-                                pass
-                logger.info(f"📊 Loaded hashes for {len(guild_hashes)} guilds")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not read guild hashes: {e}")
-
-        # Determine which guilds need syncing
-        guilds_to_sync = []
-        for guild in self.guilds:
-            guild_needs_sync = (
-                hash_changed or  # Commands changed globally
-                guild.id not in guild_hashes or  # New guild
-                guild_hashes[guild.id] != current_hash  # Hash mismatch
-            )
-            
-            if guild_needs_sync:
-                guilds_to_sync.append(guild)
-
-        if not guilds_to_sync:
-            logger.info(f"✅ All {len(self.guilds)} guilds are up to date")
-            return
-
-        logger.info(f"🔄 Need to sync {len(guilds_to_sync)} out of {len(self.guilds)} guilds")
-        
-        # Conservative guild syncing with progressive limits
-        MAX_SYNC_PER_SESSION = min(3, len(guilds_to_sync))  # Sync up to 3 guilds per restart
-        BASE_DELAY = 10  # Base delay between syncs
-        
-        synced_count = 0
-        failed_count = 0
-        
-        for i, guild in enumerate(guilds_to_sync[:MAX_SYNC_PER_SESSION]):
-            try:
-                # Progressive delay between guild syncs
-                if i > 0:
-                    delay = BASE_DELAY + (i * 5)
-                    logger.info(f"⏳ Waiting {delay}s before syncing to {guild.name}...")
-                    await asyncio.sleep(delay)
-                
-                logger.info(f"🔄 Syncing commands to {guild.name} (ID: {guild.id}) [{i+1}/{MAX_SYNC_PER_SESSION}]")
-                await self.sync_commands(guild_ids=[guild.id])
-                
-                # Update guild hash
-                guild_hashes[guild.id] = current_hash
-                synced_count += 1
-                
-                logger.info(f"✅ Successfully synced to {guild.name}")
-                
-                # Short delay after successful sync
-                await asyncio.sleep(5)
-                
-            except Exception as e:
-                failed_count += 1
-                error_msg = str(e)
-                if "rate limited" in error_msg.lower():
-                    logger.error(f"❌ Rate limited while syncing to {guild.name}")
-                    
-                    # Extract retry time from error if possible
-                    retry_match = re.search(r'Retrying in ([\d.]+) seconds', error_msg)
-                    if retry_match:
-                        retry_time = float(retry_match.group(1))
-                        cooldown_until = time.time() + retry_time + 60  # Add buffer
-                        
-                        # Save rate limit cooldown
-                        with open(rate_limit_file, 'w') as f:
-                            f.write(str(cooldown_until))
-                        
-                        logger.error(f"💾 Saved rate limit cooldown until {retry_time + 60}s from now")
-                    
-                    # Save progress and exit immediately
-                    self._save_guild_hashes(guild_hashes, guild_hash_file)
+                    logger.error(f"❌ Global sync failed: {e}")
+                    # Don't fallback to guild sync - this causes rate limits
                     return
-                else:
-                    logger.error(f"❌ Failed to sync to {guild.name}: {e}")
 
-        # Save updated guild hashes
-        self._save_guild_hashes(guild_hashes, guild_hash_file)
-        
-        # Save global hash only if we synced successfully
-        if synced_count > 0:
-            try:
-                with open(hash_file_path, 'w') as f:
-                    f.write(current_hash)
-            except Exception as e:
-                logger.warning(f"⚠️ Could not save command hash: {e}")
-
-        remaining_guilds = len(guilds_to_sync) - synced_count
-        if remaining_guilds > 0:
-            logger.info(f"⏳ {remaining_guilds} guilds remaining - will sync on next restart")
-        
-        logger.info(f"🎉 Guild-specific sync complete: {synced_count} success, {failed_count} failed")
-
-    def _save_guild_hashes(self, guild_hashes: dict, file_path: str):
-        """Save guild command hashes to file"""
-        try:
-            with open(file_path, 'w') as f:
-                for guild_id, hash_value in guild_hashes.items():
-                    f.write(f"{guild_id}:{hash_value}\n")
-            logger.info(f"💾 Saved hashes for {len(guild_hashes)} guilds")
         except Exception as e:
-            logger.error(f"❌ Failed to save guild hashes: {e}")
-
-    
-
-    def save_command_hash(self, hash_value, file_path):
-        """
-        Save command hash to file
-        """
-        try:
-            with open(file_path, 'w') as f:
-                f.write(hash_value)
-            logger.info(f"💾 Saved command hash: {hash_value[:10]}... to {file_path}")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Failed to save hash: {e}")
-            return False
+            logger.error(f"❌ Command registration failed: {e}")
 
     async def cleanup_connections(self):
         """Clean up AsyncSSH connections on shutdown"""
@@ -435,14 +231,15 @@ class EmeraldKillfeedBot(commands.Bot):
             if hasattr(self, 'killfeed_parser') and self.killfeed_parser:
                 await self.killfeed_parser.cleanup_sftp_connections()
 
-            if hasattr(self, 'log_parser') and self.log_parser:
-                # Clean up log parser SFTP connections
-                for pool_key, conn in list(self.log_parser.sftp_pool.items()):
+            if hasattr(self, 'unified_log_parser') and self.unified_log_parser:
+                # Clean up unified parser SFTP connections
+                for pool_key, conn in list(self.unified_log_parser.sftp_connections.items()):
                     try:
-                        conn.close()
+                        if not conn.is_closed():
+                            conn.close()
                     except:
                         pass
-                self.log_parser.sftp_pool.clear()
+                self.unified_log_parser.sftp_connections.clear()
 
             logger.info("Cleaned up all SFTP connections")
 
@@ -481,7 +278,7 @@ class EmeraldKillfeedBot(commands.Bot):
             # Initialize parsers (PHASE 2) - Data parsers for killfeed & log events
             self.killfeed_parser = KillfeedParser(self)
             self.historical_parser = HistoricalParser(self)
-            self.unified_parser = UnifiedLogParser(self)
+            self.unified_log_parser = UnifiedLogParser(self)
             logger.info("Parsers initialized (PHASE 2) + Unified Log Parser + Batch Sender")
 
             return True
@@ -501,55 +298,49 @@ class EmeraldKillfeedBot(commands.Bot):
             return False
 
     async def on_ready(self):
-        """Called when bot is ready and connected to Discord - MULTI-GUILD RATE LIMIT SAFE VERSION"""
+        """Called when bot is ready and connected to Discord"""
         # Only run setup once
         if hasattr(self, '_setup_complete'):
             return
 
-        logger.info("🚀 Bot is ready! Loading cogs first...")
+        logger.info("🚀 Bot is ready! Starting bulletproof setup...")
 
-        # CRITICAL: Load cogs FIRST before anything else
         try:
+            # STEP 1: Load cogs FIRST
             logger.info("🔧 Loading cogs for command registration...")
             cogs_success = await self.load_cogs()
             logger.info(f"🎯 Cog loading: {'✅ Complete' if cogs_success else '❌ Failed'}")
 
-            # Give py-cord time to process async setup functions
-            await asyncio.sleep(2.0)  # Allow more time for py-cord to process command registration
+            # STEP 2: Wait for py-cord to process commands
+            await asyncio.sleep(3.0)
 
-            # Force a fresh command sync by removing the hash file
-            hash_file_path = "command_hash.txt"
-            if os.path.exists(hash_file_path):
-                os.remove(hash_file_path)
-                logger.info("🔄 Removed command hash to force fresh sync")
-
-            # Use the specialized Multi-Guild Command Registration System
+            # STEP 3: Bulletproof command sync
             await self.register_commands_safely()
 
-            logger.info("🚀 Now starting database and parser setup...")
-
-            # Connect to MongoDB
+            # STEP 4: Database setup
+            logger.info("🚀 Starting database and parser setup...")
             db_success = await self.setup_database()
             logger.info(f"📊 Database setup: {'✅ Success' if db_success else '❌ Failed'}")
 
-            # Start scheduler
+            # STEP 5: Scheduler setup
             scheduler_success = self.setup_scheduler()
             logger.info(f"⏰ Scheduler setup: {'✅ Success' if scheduler_success else '❌ Failed'}")
 
-            # Schedule parsers (PHASE 2)
+            # STEP 6: Schedule parsers
             if self.killfeed_parser:
                 self.killfeed_parser.schedule_killfeed_parser()
                 logger.info("📡 Killfeed parser scheduled")
-            if self.unified_parser:
+
+            if self.unified_log_parser:
                 self.scheduler.add_job(
-                    self.unified_parser.run_log_parser,
+                    self.unified_log_parser.run_log_parser,
                     'interval',
                     seconds=180,
                     id='unified_log_parser'
                 )
                 logger.info("📜 Unified log parser scheduled")
 
-            # Bot ready messages
+            # STEP 7: Final status
             if self.user:
                 logger.info("✅ Bot logged in as %s (ID: %s)", self.user.name, self.user.id)
             logger.info("✅ Connected to %d guilds", len(self.guilds))
@@ -564,12 +355,6 @@ class EmeraldKillfeedBot(commands.Bot):
             else:
                 logger.warning("⚠️ Assets directory not found")
 
-            # Verify dev data exists (for testing)
-            if self.dev_mode:
-                csv_files = list(self.dev_data_path.glob('csv/*.csv'))
-                log_files = list(self.dev_data_path.glob('logs/*.log'))
-                logger.info("🧪 Dev mode: Found %d CSV files and %d log files", len(csv_files), len(log_files))
-
             logger.info("🎉 Bot setup completed successfully!")
             self._setup_complete = True
 
@@ -578,25 +363,9 @@ class EmeraldKillfeedBot(commands.Bot):
             raise
 
     async def on_guild_join(self, guild):
-        """Called when bot joins a new guild"""
+        """Called when bot joins a new guild - NO SYNC to prevent rate limits"""
         logger.info("Joined guild: %s (ID: %s)", guild.name, guild.id)
-
-        # Sync commands to the new guild immediately
-        logger.info(f"🔄 New guild joined - syncing commands to: {guild.name}")
-        try:
-            await self.sync_commands(guild_ids=[guild.id])
-            logger.info(f"✅ Successfully synced commands to new guild {guild.name}")
-
-            # Update guild hash tracking
-            current_hash = compute_command_hash(self)
-            guild_hash_file = "guild_command_hashes.txt"
-            
-            with open(guild_hash_file, 'a') as f:
-                f.write(f"{guild.id}:{current_hash}\n")
-            logger.info(f"✅ Tracked new guild hash")
-
-        except Exception as e:
-            logger.error(f"❌ Failed to sync commands to new guild {guild.name}: {e}")
+        logger.info("Commands will be available after next restart (bulletproof mode)")
 
     async def on_guild_remove(self, guild):
         """Called when bot is removed from a guild"""
@@ -608,11 +377,6 @@ class EmeraldKillfeedBot(commands.Bot):
 
         # Clean up SFTP connections
         await self.cleanup_connections()
-
-        # Shutdown log parser to save state
-        if hasattr(self, 'unified_parser') and self.unified_parser:
-            # Unified parser cleanup handled in close() method
-            pass
 
         if self.scheduler.running:
             self.scheduler.shutdown()
@@ -636,11 +400,6 @@ class EmeraldKillfeedBot(commands.Bot):
 
             # Clean up SFTP connections
             await self.cleanup_connections()
-
-            # Shutdown log parser to save state
-            if hasattr(self, 'unified_parser') and self.unified_parser:
-                # Unified parser cleanup handled in close() method
-                pass
 
             if self.scheduler.running:
                 self.scheduler.shutdown()
