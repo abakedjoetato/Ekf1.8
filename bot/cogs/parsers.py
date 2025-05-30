@@ -556,14 +556,69 @@ class Parsers(commands.Cog):
             guild_id = ctx.guild.id
             
             # Reset file states (forces cold start)
-            parser.reset_file_states(reset_all_tracking=True)
+            if hasattr(parser, 'reset_parser_state'):
+                parser.reset_parser_state()
+            else:
+                # Manual reset if method doesn't exist
+                parser.file_states.clear()
+                parser.player_sessions.clear()
+                parser.player_lifecycle.clear()
+                parser.last_log_position.clear()
+                if hasattr(parser, 'log_file_hashes'):
+                    parser.log_file_hashes.clear()
+                if hasattr(parser, 'server_status'):
+                    parser.server_status.clear()
             
-            # Reset player tracking states for accurate counts
-            parser.player_sessions.clear()
-            parser.player_lifecycle.clear()
-            parser.server_status.clear()
-            parser.last_log_position.clear()
-            parser.log_file_hashes.clear()
+            # Update voice channels to reflect reset counts (0 players)
+            await parser.update_voice_channel(str(guild_id))
+
+            # Trigger immediate cold start
+            try:
+                await parser.run_log_parser()
+                
+                embed = discord.Embed(
+                    title="🔄 Player Count Refresh Complete",
+                    description="Player counts have been reset and cold start parsing completed.",
+                    color=0x00AA00
+                )
+                
+                embed.add_field(
+                    name="Actions Completed",
+                    value="• Reset all tracking states\n• Updated voice channel counts\n• Ran cold start parsing\n• Processed current log data",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="Next Scheduled Run",
+                    value="Will be a hot start processing only new events",
+                    inline=False
+                )
+                
+            except Exception as parse_error:
+                logger.error(f"Cold start parsing failed: {parse_error}")
+                embed = discord.Embed(
+                    title="⚠️ Partial Success",
+                    description="States were reset but cold start parsing failed.",
+                    color=0xFFAA00
+                )
+                
+                embed.add_field(
+                    name="Completed",
+                    value="• Reset all tracking states\n• Updated voice channel counts",
+                    inline=False
+                )
+                
+                embed.add_field(
+                    name="Failed",
+                    value="• Cold start parsing failed\n• Check logs for details",
+                    inline=False
+                )
+
+            await ctx.followup.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Failed to refresh player count: {e}")
+            await ctx.followup.send(f"❌ Failed to refresh: {str(e)}")ser.log_file_hashes.clear()
             
             # Update voice channels to reflect reset counts (0 players)
             await parser.update_voice_channel(str(guild_id))

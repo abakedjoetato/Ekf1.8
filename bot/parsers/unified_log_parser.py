@@ -69,6 +69,21 @@ class UnifiedLogParser:
             'vehicle_spawn': re.compile(r'LogSFPS: \[ASFPSGameMode::NewVehicle_Add\] Add vehicle (BP_SFPSVehicle_[A-Za-z0-9_]+)', re.IGNORECASE),
             'vehicle_delete': re.compile(r'LogSFPS: \[ASFPSGameMode::NewVehicle_Del\] Del vehicle (BP_SFPSVehicle_[A-Za-z0-9_]+)', re.IGNORECASE),
 
+            # Airdrop patterns
+            'airdrop_event': re.compile(r'Event_AirDrop.*spawned.*location.*X=([\d\.-]+).*Y=([\d\.-]+)', re.IGNORECASE),
+            'airdrop_spawn': re.compile(r'LogSFPS:.*airdrop.*spawn', re.IGNORECASE),
+            'airdrop_flying': re.compile(r'LogSFPS:.*airdrop.*flying', re.IGNORECASE),
+
+            # Helicrash patterns
+            'helicrash_event': re.compile(r'Helicrash.*spawned.*location.*X=([\d\.-]+).*Y=([\d\.-]+)', re.IGNORECASE),
+            'helicrash_spawn': re.compile(r'LogSFPS:.*helicrash.*spawn', re.IGNORECASE),
+            'helicrash_crash': re.compile(r'LogSFPS:.*helicopter.*crash', re.IGNORECASE),
+
+            # Trader patterns
+            'trader_spawn': re.compile(r'Trader.*spawned.*location.*X=([\d\.-]+).*Y=([\d\.-]+)', re.IGNORECASE),
+            'trader_event': re.compile(r'LogSFPS:.*trader.*spawn', re.IGNORECASE),
+            'trader_arrival': re.compile(r'LogSFPS:.*trader.*arrived', re.IGNORECASE),
+
             # Timestamp
             'timestamp': re.compile(r'\[(\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}:\d{3})\]')
         }
@@ -193,7 +208,7 @@ class UnifiedLogParser:
                             server_host_key_algs=['ssh-rsa', 'rsa-sha2-256', 'rsa-sha2-512'],
                             kex_algs=['diffie-hellman-group14-sha256', 'diffie-hellman-group16-sha512', 'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521'],
                             encryption_algs=['aes128-ctr', 'aes192-ctr', 'aes256-ctr', 'aes128-gcm@openssh.com', 'aes256-gcm@openssh.com'],
-                            mac_algs=['hmac-sha2-256', 'hmac-sha512', 'hmac-sha1']
+                            mac_algs=['hmac-sha2-256', 'hmac-sha1']
                         ),
                         timeout=30
                     )
@@ -399,6 +414,47 @@ class UnifiedLogParser:
                         if embed:
                             embeds.append(embed)
 
+                # Airdrop events
+                airdrop_match = self.patterns['airdrop_event'].search(line) or self.patterns['airdrop_spawn'].search(line) or self.patterns['airdrop_flying'].search(line)
+                if airdrop_match:
+                    if not cold_start:
+                        embed = await self.create_airdrop_embed()
+                        if embed:
+                            embeds.append(embed)
+
+                # Helicrash events
+                helicrash_match = self.patterns['helicrash_event'].search(line) or self.patterns['helicrash_spawn'].search(line) or self.patterns['helicrash_crash'].search(line)
+                if helicrash_match:
+                    if not cold_start:
+                        embed = await self.create_helicrash_embed()
+                        if embed:
+                            embeds.append(embed)
+
+                # Trader events
+                trader_match = self.patterns['trader_spawn'].search(line) or self.patterns['trader_event'].search(line) or self.patterns['trader_arrival'].search(line)
+                if trader_match:
+                    if not cold_start:
+                        embed = await self.create_trader_embed()
+                        if embed:
+                            embeds.append(embed)
+
+                # Vehicle events
+                vehicle_spawn_match = self.patterns['vehicle_spawn'].search(line)
+                if vehicle_spawn_match:
+                    vehicle_type = vehicle_spawn_match.group(1)
+                    if not cold_start:
+                        embed = await self.create_vehicle_embed('spawn', vehicle_type)
+                        if embed:
+                            embeds.append(embed)
+
+                vehicle_delete_match = self.patterns['vehicle_delete'].search(line)
+                if vehicle_delete_match:
+                    vehicle_type = vehicle_delete_match.group(1)
+                    if not cold_start:
+                        embed = await self.create_vehicle_embed('delete', vehicle_type)
+                        if embed:
+                            embeds.append(embed)
+
             except Exception as e:
                 logger.error(f"Error processing line: {e}")
                 continue
@@ -461,62 +517,170 @@ class UnifiedLogParser:
             logger.error(f"Failed to create mission embed: {e}")
             return None
 
+    async def create_airdrop_embed(self, location: str = "Unknown") -> Optional[discord.Embed]:
+        """Create airdrop embed"""
+        try:
+            embed = EmbedFactory.create_airdrop_embed(
+                state="incoming",
+                location=location,
+                timestamp=datetime.now(timezone.utc)
+            )
+            return embed
+        except Exception as e:
+            logger.error(f"Failed to create airdrop embed: {e}")
+            return None
+
+    async def create_helicrash_embed(self, location: str = "Unknown") -> Optional[discord.Embed]:
+        """Create helicrash embed"""
+        try:
+            embed = EmbedFactory.create_helicrash_embed(
+                location=location,
+                timestamp=datetime.now(timezone.utc)
+            )
+            return embed
+        except Exception as e:
+            logger.error(f"Failed to create helicrash embed: {e}")
+            return None
+
+    async def create_trader_embed(self, location: str = "Unknown") -> Optional[discord.Embed]:
+        """Create trader embed"""
+        try:
+            embed = discord.Embed(
+                title="🏪 Trader Arrived",
+                description=f"A trader has arrived at {location}",
+                color=0xFFD700,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.add_field(name="Location", value=location, inline=True)
+            embed.add_field(name="Status", value="Available", inline=True)
+            embed.set_thumbnail(url="attachment://Trader.png")
+            embed.set_footer(text="Trader Event • Emerald Servers")
+            return embed
+        except Exception as e:
+            logger.error(f"Failed to create trader embed: {e}")
+            return None
+
+    async def create_vehicle_embed(self, action: str, vehicle_type: str) -> Optional[discord.Embed]:
+        """Create vehicle embed"""
+        try:
+            if action == 'spawn':
+                title = "🚗 Vehicle Spawned"
+                description = f"A {vehicle_type} has been deployed"
+                color = 0x00FF00
+            else:
+                title = "🔧 Vehicle Removed"
+                description = f"A {vehicle_type} has been removed"
+                color = 0xFF0000
+
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=color,
+                timestamp=datetime.now(timezone.utc)
+            )
+            embed.add_field(name="Vehicle Type", value=vehicle_type.replace('BP_SFPSVehicle_', ''), inline=True)
+            embed.add_field(name="Action", value=action.title(), inline=True)
+            embed.set_thumbnail(url="attachment://Vehicle.png")
+            embed.set_footer(text="Vehicle Event • Emerald Servers")
+            return embed
+        except Exception as e:
+            logger.error(f"Failed to create vehicle embed: {e}")
+            return None
+
     async def update_voice_channel(self, guild_id: str):
         """BULLETPROOF voice channel update"""
         try:
-            # Convert guild_id to int
+            # Convert guild_id to int with better validation
             if isinstance(guild_id, str):
                 # Skip if it's a MongoDB ObjectId
                 if len(guild_id) == 24 and all(c in '0123456789abcdef' for c in guild_id.lower()):
+                    logger.debug(f"Skipping voice update for MongoDB ObjectId: {guild_id}")
                     return
-                guild_id_int = int(guild_id)
+                try:
+                    guild_id_int = int(guild_id)
+                except ValueError:
+                    logger.warning(f"Invalid guild_id format: {guild_id}")
+                    return
             else:
                 guild_id_int = guild_id
 
-            # Count active players
+            # Count active players with better key validation
             guild_prefix = f"{guild_id}_"
-            active_players = sum(
-                1 for key, session in self.player_sessions.items()
-                if key.startswith(guild_prefix) and session.get('status') == 'online'
-            )
+            active_players = 0
+            
+            for key, session in self.player_sessions.items():
+                if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online':
+                    active_players += 1
 
-            # Get guild config
+            logger.debug(f"Counted {active_players} active players for guild {guild_id_int}")
+
+            # Get guild config with validation
             if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                logger.warning("Database manager not available for voice channel update")
                 return
 
             guild_config = await self.bot.db_manager.get_guild(guild_id_int)
             if not guild_config:
+                logger.debug(f"No guild config found for {guild_id_int}")
                 return
 
-            # Find voice channel ID
+            # Find voice channel ID with better logic
             voice_channel_id = None
 
             # Check server channels first
             server_channels = guild_config.get('server_channels', {})
             for server_id, channels in server_channels.items():
-                if 'voice_count' in channels:
+                if isinstance(channels, dict) and 'voice_count' in channels:
                     voice_channel_id = channels['voice_count']
+                    logger.debug(f"Found voice channel {voice_channel_id} in server {server_id}")
                     break
 
             # Legacy fallback
             if not voice_channel_id:
-                voice_channel_id = guild_config.get('channels', {}).get('voice_count')
+                legacy_channels = guild_config.get('channels', {})
+                if isinstance(legacy_channels, dict):
+                    voice_channel_id = legacy_channels.get('voice_count')
+                    if voice_channel_id:
+                        logger.debug(f"Using legacy voice channel {voice_channel_id}")
 
             if not voice_channel_id:
+                logger.debug(f"No voice channel configured for guild {guild_id_int}")
                 return
 
-            # Update the channel
+            # Update the channel with rate limit protection
             guild = self.bot.get_guild(guild_id_int)
-            if guild:
-                voice_channel = guild.get_channel(voice_channel_id)
-                if voice_channel and voice_channel.type == discord.ChannelType.voice:
-                    new_name = f"🟢 Players Online: {active_players}"
-                    if voice_channel.name != new_name:
-                        await voice_channel.edit(name=new_name)
-                        logger.info(f"✅ Voice channel updated: {active_players} players")
+            if not guild:
+                logger.warning(f"Guild {guild_id_int} not found")
+                return
+                
+            voice_channel = guild.get_channel(voice_channel_id)
+            if not voice_channel:
+                logger.warning(f"Voice channel {voice_channel_id} not found in guild {guild_id_int}")
+                return
+                
+            if voice_channel.type != discord.ChannelType.voice:
+                logger.warning(f"Channel {voice_channel_id} is not a voice channel")
+                return
+
+            new_name = f"🟢 Players Online: {active_players}"
+            if voice_channel.name != new_name:
+                try:
+                    await voice_channel.edit(name=new_name)
+                    logger.info(f"✅ Voice channel updated to: {new_name}")
+                except discord.HTTPException as e:
+                    if e.status == 429:  # Rate limited
+                        logger.warning(f"Rate limited updating voice channel: {e}")
+                    else:
+                        logger.error(f"HTTP error updating voice channel: {e}")
+                except Exception as edit_error:
+                    logger.error(f"Error editing voice channel: {edit_error}")
+            else:
+                logger.debug(f"Voice channel already has correct name: {new_name}")
 
         except Exception as e:
             logger.error(f"Voice channel update failed: {e}")
+            import traceback
+            logger.error(f"Voice channel update traceback: {traceback.format_exc()}")
 
     async def get_channel_for_type(self, guild_id: int, server_id: str, channel_type: str) -> Optional[int]:
         """Get channel ID with bulletproof fallback"""
@@ -710,10 +874,26 @@ class UnifiedLogParser:
 
     def reset_parser_state(self):
         """Reset all parser state"""
-        self.file_states.clear()
-        self.player_sessions.clear()
-        self.player_lifecycle.clear()
-        self.last_log_position.clear()
-        self.log_file_hashes.clear()
-        self.server_status.clear()
-        logger.info("✅ Parser state reset")
+        try:
+            self.file_states.clear()
+            self.player_sessions.clear()
+            self.player_lifecycle.clear()
+            self.last_log_position.clear()
+            self.log_file_hashes.clear()
+            if hasattr(self, 'server_status'):
+                self.server_status.clear()
+            logger.info("✅ Parser state reset")
+        except Exception as e:
+            logger.error(f"Error resetting parser state: {e}")
+
+    def get_active_player_count(self, guild_id: str) -> int:
+        """Get active player count for a guild"""
+        try:
+            guild_prefix = f"{guild_id}_"
+            return sum(
+                1 for key, session in self.player_sessions.items()
+                if key.startswith(guild_prefix) and isinstance(session, dict) and session.get('status') == 'online'
+            )
+        except Exception as e:
+            logger.error(f"Error getting active player count: {e}")
+            return 0
