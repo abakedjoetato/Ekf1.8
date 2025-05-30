@@ -200,10 +200,10 @@ class EmeraldKillfeedBot(commands.Bot):
 
     async def register_commands_safely(self):
         """
-        Rate-limit Safe Guild Command Registration System
+        Ultra-Conservative Rate-limit Safe Guild Command Registration
         
-        Uses per-guild hashing to avoid unnecessary syncing and prevent rate limits.
-        Only syncs when commands actually change or for new guilds.
+        Uses aggressive delays and minimal syncing to prevent rate limits entirely.
+        Only syncs when absolutely necessary with exponential backoff.
         """
         command_count = len(self.pending_application_commands) if hasattr(self, 'pending_application_commands') else 0
         logger.info(f"📊 {command_count} commands registered locally")
@@ -211,6 +211,22 @@ class EmeraldKillfeedBot(commands.Bot):
         if command_count == 0:
             logger.warning("⚠️ No commands to sync")
             return
+
+        # Check for rate limit indicator file
+        rate_limit_file = "rate_limit_cooldown.txt"
+        if os.path.exists(rate_limit_file):
+            try:
+                with open(rate_limit_file, 'r') as f:
+                    cooldown_until = float(f.read().strip())
+                    if time.time() < cooldown_until:
+                        remaining = int(cooldown_until - time.time())
+                        logger.warning(f"⏳ Still in rate limit cooldown for {remaining}s - skipping sync")
+                        return
+                    else:
+                        os.remove(rate_limit_file)
+                        logger.info("✅ Rate limit cooldown expired")
+            except:
+                pass
 
         # Compute current command hash
         current_hash = compute_command_hash(self)
@@ -246,13 +262,17 @@ class EmeraldKillfeedBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"⚠️ Could not read guild hashes: {e}")
 
+        # Only sync if commands actually changed
+        if not hash_changed and len(guild_hashes) >= len(self.guilds):
+            logger.info(f"✅ Commands unchanged and all {len(self.guilds)} guilds are up to date")
+            return
+
         # Determine which guilds need syncing
         guilds_to_sync = []
         for guild in self.guilds:
             guild_needs_sync = (
                 hash_changed or  # Commands changed globally
-                guild.id not in guild_hashes or  # New guild
-                guild_hashes.get(guild.id) != current_hash  # Guild has old hash
+                guild.id not in guild_hashes  # New guild only
             )
             
             if guild_needs_sync:
@@ -264,57 +284,74 @@ class EmeraldKillfeedBot(commands.Bot):
 
         logger.info(f"🔄 Need to sync {len(guilds_to_sync)} out of {len(self.guilds)} guilds")
         
-        # Limit concurrent syncing to avoid rate limits
-        MAX_GUILDS_PER_BATCH = 3
-        DELAY_BETWEEN_SYNCS = 5  # seconds
+        # Ultra-conservative rate limiting
+        MAX_SYNC_PER_SESSION = 1  # Only sync 1 guild per bot restart
+        BASE_DELAY = 15  # Base delay between syncs
         
         synced_count = 0
         failed_count = 0
         
-        for i in range(0, len(guilds_to_sync), MAX_GUILDS_PER_BATCH):
-            batch = guilds_to_sync[i:i + MAX_GUILDS_PER_BATCH]
-            
-            for guild in batch:
-                try:
-                    logger.info(f"🔄 Syncing commands to {guild.name} (ID: {guild.id})")
-                    await self.sync_commands(guild_ids=[guild.id])
+        # Only sync the first guild to avoid rate limits
+        for i, guild in enumerate(guilds_to_sync[:MAX_SYNC_PER_SESSION]):
+            try:
+                # Progressive delay - longer for each guild
+                delay = BASE_DELAY * (i + 1)
+                if i > 0:
+                    logger.info(f"⏳ Waiting {delay}s before syncing to {guild.name}...")
+                    await asyncio.sleep(delay)
+                
+                logger.info(f"🔄 Syncing commands to {guild.name} (ID: {guild.id}) [{i+1}/{min(len(guilds_to_sync), MAX_SYNC_PER_SESSION)}]")
+                await self.sync_commands(guild_ids=[guild.id])
+                
+                # Update guild hash
+                guild_hashes[guild.id] = current_hash
+                synced_count += 1
+                
+                logger.info(f"✅ Successfully synced to {guild.name}")
+                
+                # Long delay after successful sync
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                failed_count += 1
+                error_msg = str(e)
+                if "rate limited" in error_msg.lower():
+                    logger.error(f"❌ Rate limited while syncing to {guild.name}")
                     
-                    # Update guild hash
-                    guild_hashes[guild.id] = current_hash
-                    synced_count += 1
+                    # Extract retry time from error if possible
+                    retry_match = re.search(r'Retrying in ([\d.]+) seconds', error_msg)
+                    if retry_match:
+                        retry_time = float(retry_match.group(1))
+                        cooldown_until = time.time() + retry_time + 60  # Add buffer
+                        
+                        # Save rate limit cooldown
+                        with open(rate_limit_file, 'w') as f:
+                            f.write(str(cooldown_until))
+                        
+                        logger.error(f"💾 Saved rate limit cooldown until {retry_time + 60}s from now")
                     
-                    logger.info(f"✅ Successfully synced to {guild.name}")
-                    
-                    # Small delay between individual syncs
-                    await asyncio.sleep(1)
-                    
-                except Exception as e:
-                    failed_count += 1
-                    error_msg = str(e)
-                    if "rate limited" in error_msg.lower():
-                        logger.error(f"❌ Rate limited while syncing to {guild.name} - stopping sync")
-                        # Save progress and exit
-                        self._save_guild_hashes(guild_hashes, guild_hash_file)
-                        return
-                    else:
-                        logger.error(f"❌ Failed to sync to {guild.name}: {e}")
-            
-            # Longer delay between batches
-            if i + MAX_GUILDS_PER_BATCH < len(guilds_to_sync):
-                logger.info(f"⏳ Waiting {DELAY_BETWEEN_SYNCS}s before next batch...")
-                await asyncio.sleep(DELAY_BETWEEN_SYNCS)
+                    # Save progress and exit immediately
+                    self._save_guild_hashes(guild_hashes, guild_hash_file)
+                    return
+                else:
+                    logger.error(f"❌ Failed to sync to {guild.name}: {e}")
 
         # Save updated guild hashes
         self._save_guild_hashes(guild_hashes, guild_hash_file)
         
-        # Save global hash
-        try:
-            with open(hash_file_path, 'w') as f:
-                f.write(current_hash)
-        except Exception as e:
-            logger.warning(f"⚠️ Could not save command hash: {e}")
+        # Save global hash only if we synced successfully
+        if synced_count > 0:
+            try:
+                with open(hash_file_path, 'w') as f:
+                    f.write(current_hash)
+            except Exception as e:
+                logger.warning(f"⚠️ Could not save command hash: {e}")
 
-        logger.info(f"🎉 Sync complete: {synced_count} success, {failed_count} failed")
+        remaining_guilds = len(guilds_to_sync) - synced_count
+        if remaining_guilds > 0:
+            logger.info(f"⏳ {remaining_guilds} guilds remaining - will sync on next restart")
+        
+        logger.info(f"🎉 Conservative sync complete: {synced_count} success, {failed_count} failed")
 
     def _save_guild_hashes(self, guild_hashes: dict, file_path: str):
         """Save guild command hashes to file"""
