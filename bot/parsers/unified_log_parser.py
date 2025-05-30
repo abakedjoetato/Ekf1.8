@@ -759,6 +759,9 @@ class UnifiedLogParser:
 
             for embed_data in embeds_data:
                 embed_type = embed_data.get('type')
+                if not embed_type:
+                    logger.warning("Embed data missing type field")
+                    continue
                 channel_type = channel_mapping.get(embed_type)
 
                 if not channel_type:
@@ -846,6 +849,7 @@ class UnifiedLogParser:
                     logger.info("No guilds found in database")
                     return
 
+                logger.info(f"Found {len(guilds_list)} guild documents to process")
                 total_servers_processed = 0
 
                 for guild_doc in guilds_list:
