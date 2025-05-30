@@ -200,10 +200,11 @@ class EmeraldKillfeedBot(commands.Bot):
 
     async def register_commands_safely(self):
         """
-        Ultra-Conservative Rate-limit Safe Guild Command Registration
+        Hybrid Command Registration: Global sync with guild-specific fallback
         
-        Uses aggressive delays and minimal syncing to prevent rate limits entirely.
-        Only syncs when absolutely necessary with exponential backoff.
+        1. Attempts global sync first (most efficient)
+        2. Falls back to guild-specific syncing if global fails
+        3. Uses rate limit protection and progressive syncing
         """
         command_count = len(self.pending_application_commands) if hasattr(self, 'pending_application_commands') else 0
         logger.info(f"📊 {command_count} commands registered locally")
@@ -231,18 +232,73 @@ class EmeraldKillfeedBot(commands.Bot):
         # Compute current command hash
         current_hash = compute_command_hash(self)
         hash_file_path = "command_hash.txt"
+        global_sync_file = "global_sync_status.txt"
         
-        # Read previous hash
+        # Read previous hash and global sync status
         previous_hash = ''
+        global_sync_completed = False
+        
         if os.path.exists(hash_file_path):
             try:
                 with open(hash_file_path, 'r') as f:
                     previous_hash = f.read().strip()
             except Exception as e:
                 logger.warning(f"⚠️ Could not read previous hash: {e}")
+        
+        if os.path.exists(global_sync_file):
+            try:
+                with open(global_sync_file, 'r') as f:
+                    sync_data = f.read().strip().split(':')
+                    if len(sync_data) == 2 and sync_data[0] == current_hash:
+                        global_sync_completed = sync_data[1] == 'completed'
+            except Exception as e:
+                logger.warning(f"⚠️ Could not read global sync status: {e}")
 
         # Check if commands changed
         hash_changed = current_hash != previous_hash
+
+        # If commands haven't changed and global sync is complete, we're done
+        if not hash_changed and global_sync_completed:
+            logger.info(f"✅ Commands unchanged and global sync completed - all guilds up to date")
+            return
+
+        # STEP 1: Try global sync first (most efficient)
+        if hash_changed or not global_sync_completed:
+            logger.info(f"🌍 Attempting global command sync...")
+            try:
+                await self.sync_commands()
+                logger.info(f"✅ Global sync successful - commands available to all guilds")
+                
+                # Mark global sync as completed
+                with open(global_sync_file, 'w') as f:
+                    f.write(f"{current_hash}:completed")
+                
+                # Save the new command hash
+                with open(hash_file_path, 'w') as f:
+                    f.write(current_hash)
+                
+                logger.info(f"🎉 Global sync complete - all {len(self.guilds)} guilds updated")
+                return
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "rate limited" in error_msg.lower():
+                    logger.error(f"❌ Global sync rate limited: {e}")
+                    
+                    # Extract retry time and save cooldown
+                    retry_match = re.search(r'Retrying in ([\d.]+) seconds', error_msg)
+                    if retry_match:
+                        retry_time = float(retry_match.group(1))
+                        cooldown_until = time.time() + retry_time + 60
+                        with open(rate_limit_file, 'w') as f:
+                            f.write(str(cooldown_until))
+                        logger.error(f"💾 Saved rate limit cooldown until {retry_time + 60}s from now")
+                    return
+                else:
+                    logger.warning(f"⚠️ Global sync failed, falling back to guild-specific: {e}")
+
+        # STEP 2: Fallback to guild-specific syncing
+        logger.info(f"🏰 Falling back to guild-specific command syncing...")
         
         # Load processed guilds with their hashes
         guild_hash_file = "guild_command_hashes.txt"
@@ -262,17 +318,13 @@ class EmeraldKillfeedBot(commands.Bot):
             except Exception as e:
                 logger.warning(f"⚠️ Could not read guild hashes: {e}")
 
-        # Only sync if commands actually changed
-        if not hash_changed and len(guild_hashes) >= len(self.guilds):
-            logger.info(f"✅ Commands unchanged and all {len(self.guilds)} guilds are up to date")
-            return
-
         # Determine which guilds need syncing
         guilds_to_sync = []
         for guild in self.guilds:
             guild_needs_sync = (
                 hash_changed or  # Commands changed globally
-                guild.id not in guild_hashes  # New guild only
+                guild.id not in guild_hashes or  # New guild
+                guild_hashes[guild.id] != current_hash  # Hash mismatch
             )
             
             if guild_needs_sync:
@@ -284,23 +336,22 @@ class EmeraldKillfeedBot(commands.Bot):
 
         logger.info(f"🔄 Need to sync {len(guilds_to_sync)} out of {len(self.guilds)} guilds")
         
-        # Ultra-conservative rate limiting
-        MAX_SYNC_PER_SESSION = 1  # Only sync 1 guild per bot restart
-        BASE_DELAY = 15  # Base delay between syncs
+        # Conservative guild syncing with progressive limits
+        MAX_SYNC_PER_SESSION = min(3, len(guilds_to_sync))  # Sync up to 3 guilds per restart
+        BASE_DELAY = 10  # Base delay between syncs
         
         synced_count = 0
         failed_count = 0
         
-        # Only sync the first guild to avoid rate limits
         for i, guild in enumerate(guilds_to_sync[:MAX_SYNC_PER_SESSION]):
             try:
-                # Progressive delay - longer for each guild
-                delay = BASE_DELAY * (i + 1)
+                # Progressive delay between guild syncs
                 if i > 0:
+                    delay = BASE_DELAY + (i * 5)
                     logger.info(f"⏳ Waiting {delay}s before syncing to {guild.name}...")
                     await asyncio.sleep(delay)
                 
-                logger.info(f"🔄 Syncing commands to {guild.name} (ID: {guild.id}) [{i+1}/{min(len(guilds_to_sync), MAX_SYNC_PER_SESSION)}]")
+                logger.info(f"🔄 Syncing commands to {guild.name} (ID: {guild.id}) [{i+1}/{MAX_SYNC_PER_SESSION}]")
                 await self.sync_commands(guild_ids=[guild.id])
                 
                 # Update guild hash
@@ -309,8 +360,8 @@ class EmeraldKillfeedBot(commands.Bot):
                 
                 logger.info(f"✅ Successfully synced to {guild.name}")
                 
-                # Long delay after successful sync
-                await asyncio.sleep(10)
+                # Short delay after successful sync
+                await asyncio.sleep(5)
                 
             except Exception as e:
                 failed_count += 1
@@ -351,7 +402,7 @@ class EmeraldKillfeedBot(commands.Bot):
         if remaining_guilds > 0:
             logger.info(f"⏳ {remaining_guilds} guilds remaining - will sync on next restart")
         
-        logger.info(f"🎉 Conservative sync complete: {synced_count} success, {failed_count} failed")
+        logger.info(f"🎉 Guild-specific sync complete: {synced_count} success, {failed_count} failed")
 
     def _save_guild_hashes(self, guild_hashes: dict, file_path: str):
         """Save guild command hashes to file"""
